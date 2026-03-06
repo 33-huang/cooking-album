@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
 
+const ADMIN_PASSWORD = "5233";
+
 const CAT_COLORS_LIST = [
   { bg:"#fef3e2",active:"#f59e0b",text:"#92400e",border:"#fcd34d" },
   { bg:"#ede9fe",active:"#8b5cf6",text:"#5b21b6",border:"#c4b5fd" },
@@ -26,7 +28,6 @@ function TagPill({ tag, small, tagSystem }) {
   return <span style={{ background:c.bg, color:c.text, border:`1px solid ${c.border}`, borderRadius:12, padding:small?"1px 7px":"3px 10px", fontSize:small?10:12, fontWeight:500, whiteSpace:"nowrap", display:"inline-block" }}>{tag}</span>;
 }
 
-// Smart split: "中文/日文/English" → { zh, ja, en }
 function smartSplit(input) {
   const parts = input.split("/").map(s => s.trim()).filter(Boolean);
   if (parts.length >= 3) return { zh: parts[0], ja: parts[1], en: parts[2] };
@@ -34,7 +35,37 @@ function smartSplit(input) {
   return null;
 }
 
+// Password modal
+function PasswordModal({ onSuccess, onCancel }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState(false);
+  const check = () => {
+    if (pw === ADMIN_PASSWORD) { onSuccess(); }
+    else { setError(true); setPw(""); }
+  };
+  return (
+    <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.4)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+      <div style={{ background:"#fff", borderRadius:16, padding:24, width:"100%", maxWidth:320 }}>
+        <h3 style={{ fontSize:17, fontWeight:600, color:"#2d2a26", margin:"0 0 4px", textAlign:"center" }}>🔒 需要管理员密码</h3>
+        <p style={{ fontSize:13, color:"#9a9590", margin:"0 0 16px", textAlign:"center" }}>请输入密码以继续操作</p>
+        <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setError(false);}}
+          onKeyDown={e=>e.key==="Enter"&&check()}
+          placeholder="输入密码" autoFocus
+          style={{ width:"100%", padding:"10px 12px", border:`1px solid ${error?"#ef4444":"#d5d0cb"}`, borderRadius:8, fontSize:15, outline:"none", boxSizing:"border-box", marginBottom:8 }} />
+        {error && <p style={{ fontSize:12, color:"#ef4444", margin:"0 0 8px" }}>密码不正确，请重试</p>}
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={onCancel} style={{ flex:1, padding:"10px 0", border:"1px solid #d5d0cb", borderRadius:8, fontSize:14, cursor:"pointer", background:"#fff", color:"#6b6560" }}>取消</button>
+          <button onClick={check} style={{ flex:1, padding:"10px 0", border:"none", borderRadius:8, fontSize:14, fontWeight:600, cursor:"pointer", background:"#e67e22", color:"#fff" }}>确认</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showPwModal, setShowPwModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
   const [appTitle, setAppTitle] = useState("🍳 我们的料理帖");
   const [tagSystem, setTagSystem] = useState({});
   const [photos, setPhotos] = useState([]);
@@ -51,6 +82,19 @@ export default function App() {
   const [tagMgr, setTagMgr] = useState({ editingCat:null, newCatName:"", newCatEmoji:"🏷️", newTagText:{}, renamingCat:null, renameCatName:"", renamingTag:null, renameTagVal:"", confirmDeleteCat:null, editTitle:false, editTitleVal:"" });
   const fileRef = useRef();
   const editFileRef = useRef();
+
+  // Admin check: run action if admin, otherwise show password modal
+  const requireAdmin = (action) => {
+    if (isAdmin) { action(); return; }
+    setPendingAction(() => action);
+    setShowPwModal(true);
+  };
+
+  const onPwSuccess = () => {
+    setIsAdmin(true);
+    setShowPwModal(false);
+    if (pendingAction) { pendingAction(); setPendingAction(null); }
+  };
 
   useEffect(() => { if (!init) { loadAll(); setInit(true); } }, [init]);
 
@@ -166,7 +210,6 @@ export default function App() {
     </div>
   );
 
-  // Tag management
   const addCategory = () => {
     const name = tagMgr.newCatName.trim();
     if (!name || tagSystem[name]) return;
@@ -215,7 +258,6 @@ export default function App() {
     setTagMgr(p => ({ ...p, renamingTag:null }));
   };
 
-  // Photo form
   const PhotoForm = ({ data, setData, onSave, title, onBack, fRef, isSaving }) => {
     const canSplit = data.names.zh.includes("/");
     const doSplit = () => {
@@ -307,6 +349,7 @@ export default function App() {
   if (view === "gallery") {
     return (
       <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8" }}>
+        {showPwModal && <PasswordModal onSuccess={onPwSuccess} onCancel={()=>{setShowPwModal(false);setPendingAction(null);}} />}
         <div style={{ position:"sticky", top:0, zIndex:10, background:"#fafaf8", borderBottom:"1px solid #e8e5e0", padding:"14px 16px 12px" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
             <div style={{ flex:1, minWidth:0 }}>
@@ -320,16 +363,20 @@ export default function App() {
                 </div>
               ) : (
                 <div>
-                  <h1 onClick={()=>setTagMgr(p=>({...p,editTitle:true,editTitleVal:appTitle}))}
-                    style={{ fontSize:20, fontWeight:700, color:"#2d2a26", margin:0, cursor:"pointer" }}>{appTitle} <span style={{ fontSize:12, color:"#c0bbb5" }}>✏️</span></h1>
+                  <h1 style={{ fontSize:20, fontWeight:700, color:"#2d2a26", margin:0, display:"flex", alignItems:"center", gap:4 }}>
+                    {appTitle}
+                    {isAdmin && <span onClick={()=>setTagMgr(p=>({...p,editTitle:true,editTitleVal:appTitle}))} style={{ fontSize:12, color:"#c0bbb5", cursor:"pointer" }}>✏️</span>}
+                  </h1>
                   <p style={{ fontSize:11, color:"#9a9590", margin:"2px 0 0" }}>{filtered.length} / {photos.length} 道料理</p>
                 </div>
               )}
             </div>
             <div style={{ display:"flex", gap:6, alignItems:"center", flexShrink:0, marginLeft:8 }}>
               <LangSwitch size="sm" />
-              <button onClick={()=>setView("tags")} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 10px", fontSize:13, cursor:"pointer" }}>⚙️</button>
-              <button onClick={()=>setView("upload")} style={{ background:"#e67e22", color:"#fff", border:"none", borderRadius:18, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>+ 追加</button>
+              {isAdmin && <button onClick={()=>setView("tags")} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 10px", fontSize:13, cursor:"pointer" }}>⚙️</button>}
+              <button onClick={()=>requireAdmin(()=>setView("upload"))} style={{ background:"#e67e22", color:"#fff", border:"none", borderRadius:18, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+                {isAdmin ? "+ 追加" : "🔒 管理"}
+              </button>
             </div>
           </div>
           <div style={{ display:"flex", gap:6, marginBottom:8, overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
@@ -414,13 +461,18 @@ export default function App() {
   if (view === "detail" && detail) {
     return (
       <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8" }}>
+        {showPwModal && <PasswordModal onSuccess={onPwSuccess} onCancel={()=>{setShowPwModal(false);setPendingAction(null);}} />}
         <div style={{ position:"sticky", top:0, zIndex:10, background:"#fafaf8", borderBottom:"1px solid #e8e5e0", padding:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <button onClick={()=>setView("gallery")} style={{ background:"none", border:"none", fontSize:15, color:"#6b6560", cursor:"pointer" }}>← 返回</button>
           <LangSwitch size="sm" />
-          <div style={{ display:"flex", gap:10 }}>
-            <button onClick={()=>{setEditing({...detail});setView("edit");}} style={{ background:"none", border:"none", fontSize:14, color:"#e67e22", cursor:"pointer", fontWeight:600 }}>编辑</button>
-            <button onClick={()=>del(detail.id)} style={{ background:"none", border:"none", fontSize:14, color:"#e74c3c", cursor:"pointer" }}>删除</button>
-          </div>
+          {isAdmin ? (
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={()=>{setEditing({...detail});setView("edit");}} style={{ background:"none", border:"none", fontSize:14, color:"#e67e22", cursor:"pointer", fontWeight:600 }}>编辑</button>
+              <button onClick={()=>del(detail.id)} style={{ background:"none", border:"none", fontSize:14, color:"#e74c3c", cursor:"pointer" }}>删除</button>
+            </div>
+          ) : (
+            <div style={{ width: 40 }} />
+          )}
         </div>
         <img src={detail.image} style={{ width:"100%", display:"block" }} alt="" />
         <div style={{ padding:16 }}>
