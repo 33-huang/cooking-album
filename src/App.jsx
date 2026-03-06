@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
 
 const CAT_COLORS_LIST = [
@@ -26,6 +26,14 @@ function TagPill({ tag, small, tagSystem }) {
   return <span style={{ background:c.bg, color:c.text, border:`1px solid ${c.border}`, borderRadius:12, padding:small?"1px 7px":"3px 10px", fontSize:small?10:12, fontWeight:500, whiteSpace:"nowrap", display:"inline-block" }}>{tag}</span>;
 }
 
+// Smart split: "中文/日文/English" → { zh, ja, en }
+function smartSplit(input) {
+  const parts = input.split("/").map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 3) return { zh: parts[0], ja: parts[1], en: parts[2] };
+  if (parts.length === 2) return { zh: parts[0], ja: parts[1], en: "" };
+  return null;
+}
+
 export default function App() {
   const [appTitle, setAppTitle] = useState("🍳 我们的料理帖");
   const [tagSystem, setTagSystem] = useState({});
@@ -36,19 +44,15 @@ export default function App() {
   const [filterCat, setFilterCat] = useState(null);
   const [selectedTags, setSelectedTags] = useState([]);
   const [upload, setUpload] = useState({ image:null, file:null, names:{zh:"",ja:"",en:""}, tags:[] });
-  const [translating, setTranslating] = useState(false);
   const [detail, setDetail] = useState(null);
   const [editing, setEditing] = useState(null);
-  const [editTranslating, setEditTranslating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [init, setInit] = useState(false);
   const [tagMgr, setTagMgr] = useState({ editingCat:null, newCatName:"", newCatEmoji:"🏷️", newTagText:{}, renamingCat:null, renameCatName:"", renamingTag:null, renameTagVal:"", confirmDeleteCat:null, editTitle:false, editTitleVal:"" });
   const fileRef = useRef();
   const editFileRef = useRef();
 
-  // Load data from Supabase
-  useEffect(() => {
-    loadAll();
-  }, []);
+  useEffect(() => { if (!init) { loadAll(); setInit(true); } }, [init]);
 
   const loadAll = async () => {
     setLoading(true);
@@ -78,7 +82,6 @@ export default function App() {
     setLoading(false);
   };
 
-  // Upload image to Supabase Storage
   const uploadImage = async (file) => {
     const ext = file.name.split(".").pop();
     const fileName = `${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
@@ -88,18 +91,14 @@ export default function App() {
     return data.publicUrl;
   };
 
-  // Save new photo
   const saveNew = async () => {
     if (!upload.file) return;
     setSaving(true);
     try {
       const imageUrl = await uploadImage(upload.file);
       const { data, error } = await supabase.from("photos").insert({
-        image_url: imageUrl,
-        name_zh: upload.names.zh || "未命名",
-        name_ja: upload.names.ja || "",
-        name_en: upload.names.en || "",
-        tags: upload.tags,
+        image_url: imageUrl, name_zh: upload.names.zh || "未命名",
+        name_ja: upload.names.ja || "", name_en: upload.names.en || "", tags: upload.tags,
       }).select().single();
       if (error) throw error;
       setPhotos(p => [{ id: data.id, image: data.image_url, names: { zh: data.name_zh, ja: data.name_ja, en: data.name_en }, tags: data.tags, date: new Date(data.created_at).toLocaleDateString("zh-CN") }, ...p]);
@@ -109,34 +108,24 @@ export default function App() {
     setSaving(false);
   };
 
-  // Save edited photo
   const saveEdit = async () => {
     if (!editing) return;
     setSaving(true);
     try {
       let imageUrl = editing.image;
-      if (editing.newFile) {
-        imageUrl = await uploadImage(editing.newFile);
-      }
+      if (editing.newFile) imageUrl = await uploadImage(editing.newFile);
       const { error } = await supabase.from("photos").update({
-        image_url: imageUrl,
-        name_zh: editing.names.zh || "未命名",
-        name_ja: editing.names.ja || "",
-        name_en: editing.names.en || "",
-        tags: editing.tags,
+        image_url: imageUrl, name_zh: editing.names.zh || "未命名",
+        name_ja: editing.names.ja || "", name_en: editing.names.en || "", tags: editing.tags,
       }).eq("id", editing.id);
       if (error) throw error;
-      const updated = { ...editing, image: imageUrl };
-      delete updated.newFile;
+      const updated = { ...editing, image: imageUrl }; delete updated.newFile;
       setPhotos(p => p.map(ph => ph.id === updated.id ? updated : ph));
-      setDetail(updated);
-      setEditing(null);
-      setView("detail");
+      setDetail(updated); setEditing(null); setView("detail");
     } catch (err) { console.error("Edit error:", err); alert("保存失败，请重试"); }
     setSaving(false);
   };
 
-  // Delete photo
   const del = async (id) => {
     try {
       await supabase.from("photos").delete().eq("id", id);
@@ -145,38 +134,16 @@ export default function App() {
     } catch (err) { console.error("Delete error:", err); }
   };
 
-  // Save app title
   const saveTitle = async (title) => {
     setAppTitle(title);
     await supabase.from("app_settings").upsert({ key: "app_title", value: title });
   };
 
-  // Save tag system
   const syncTagSystem = async (newSys) => {
     setTagSystem(newSys);
-    // Delete all and reinsert
     await supabase.from("tag_system").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    const rows = Object.entries(newSys).map(([cat, v], i) => ({
-      category: cat, emoji: v.emoji, tags: v.tags, sort_order: i,
-    }));
+    const rows = Object.entries(newSys).map(([cat, v], i) => ({ category: cat, emoji: v.emoji, tags: v.tags, sort_order: i }));
     if (rows.length > 0) await supabase.from("tag_system").insert(rows);
-  };
-
-  // Auto translate
-  const doTranslate = async (zhName, onResult, setLoad) => {
-    if (!zhName.trim()) return;
-    setLoad(true);
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, messages:[{ role:"user", content:`Translate this Chinese dish name into Japanese and English. Return ONLY a JSON object like {"ja":"...","en":"..."} with no other text. The dish name is: ${zhName.trim()}` }] }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(i => i.text||"").join("")||"";
-      const parsed = JSON.parse(text.replace(/```json|```/g,"").trim());
-      onResult(parsed);
-    } catch(err) { console.error("Translation error:", err); }
-    setLoad(false);
   };
 
   const filtered = selectedTags.length === 0 ? photos : photos.filter(p => selectedTags.every(t => p.tags.includes(t)));
@@ -203,8 +170,7 @@ export default function App() {
   const addCategory = () => {
     const name = tagMgr.newCatName.trim();
     if (!name || tagSystem[name]) return;
-    const ns = { ...tagSystem, [name]: { emoji:tagMgr.newCatEmoji, tags:[] } };
-    syncTagSystem(ns);
+    syncTagSystem({ ...tagSystem, [name]: { emoji:tagMgr.newCatEmoji, tags:[] } });
     setTagMgr(p => ({ ...p, newCatName:"", newCatEmoji:"🏷️" }));
   };
   const deleteCategory = cat => {
@@ -215,7 +181,6 @@ export default function App() {
     setSelectedTags(p => p.filter(t=>!removed.includes(t)));
     if (filterCat===cat) setFilterCat(null);
     setTagMgr(p => ({ ...p, editingCat:null, confirmDeleteCat:null }));
-    // Also update photos in DB
     removed.forEach(async tag => {
       const { data } = await supabase.from("photos").select("id, tags").contains("tags", [tag]);
       if (data) data.forEach(async ph => {
@@ -226,113 +191,114 @@ export default function App() {
   const renameCategory = oldName => {
     const newName = tagMgr.renameCatName.trim();
     if (!newName || newName===oldName || tagSystem[newName]) { setTagMgr(p=>({...p,renamingCat:null})); return; }
-    const ns = Object.fromEntries(Object.entries(tagSystem).map(([k,v])=>k===oldName?[newName,v]:[k,v]));
-    syncTagSystem(ns);
+    syncTagSystem(Object.fromEntries(Object.entries(tagSystem).map(([k,v])=>k===oldName?[newName,v]:[k,v])));
     setTagMgr(p => ({ ...p, renamingCat:null }));
   };
-  const setCatEmoji = (cat, emoji) => {
-    const ns = { ...tagSystem, [cat]:{ ...tagSystem[cat], emoji } };
-    syncTagSystem(ns);
-  };
+  const setCatEmoji = (cat, emoji) => syncTagSystem({ ...tagSystem, [cat]:{ ...tagSystem[cat], emoji } });
   const addTag = cat => {
     const t = (tagMgr.newTagText[cat]||"").trim();
     if (!t || tagSystem[cat].tags.includes(t)) return;
-    const ns = { ...tagSystem, [cat]:{ ...tagSystem[cat], tags:[...tagSystem[cat].tags, t] } };
-    syncTagSystem(ns);
+    syncTagSystem({ ...tagSystem, [cat]:{ ...tagSystem[cat], tags:[...tagSystem[cat].tags, t] } });
     setTagMgr(p => ({ ...p, newTagText:{...p.newTagText,[cat]:""} }));
   };
   const deleteTag = (cat, tag) => {
-    const ns = { ...tagSystem, [cat]:{ ...tagSystem[cat], tags:tagSystem[cat].tags.filter(t=>t!==tag) } };
-    syncTagSystem(ns);
+    syncTagSystem({ ...tagSystem, [cat]:{ ...tagSystem[cat], tags:tagSystem[cat].tags.filter(t=>t!==tag) } });
     setPhotos(p => p.map(ph => ({ ...ph, tags:ph.tags.filter(t=>t!==tag) })));
     setSelectedTags(p => p.filter(t=>t!==tag));
   };
   const renameTag = (cat, oldTag) => {
     const newTag = tagMgr.renameTagVal.trim();
     if (!newTag || newTag===oldTag) { setTagMgr(p=>({...p,renamingTag:null})); return; }
-    const ns = { ...tagSystem, [cat]:{ ...tagSystem[cat], tags:tagSystem[cat].tags.map(t=>t===oldTag?newTag:t) } };
-    syncTagSystem(ns);
+    syncTagSystem({ ...tagSystem, [cat]:{ ...tagSystem[cat], tags:tagSystem[cat].tags.map(t=>t===oldTag?newTag:t) } });
     setPhotos(p => p.map(ph => ({ ...ph, tags:ph.tags.map(t=>t===oldTag?newTag:t) })));
     setSelectedTags(p => p.map(t=>t===oldTag?newTag:t));
     setTagMgr(p => ({ ...p, renamingTag:null }));
   };
 
   // Photo form
-  const PhotoForm = ({ data, setData, onSave, title, onBack, isTranslating, onTranslate, fRef, isSaving }) => (
-    <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8" }}>
-      <div style={{ position:"sticky", top:0, zIndex:10, background:"#fafaf8", borderBottom:"1px solid #e8e5e0", padding:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-        <button onClick={onBack} style={{ background:"none", border:"none", fontSize:15, color:"#6b6560", cursor:"pointer" }}>← 返回</button>
-        <h2 style={{ fontSize:17, fontWeight:600, color:"#2d2a26", margin:0 }}>{title}</h2>
-        <button onClick={onSave} disabled={!data.image || isSaving} style={{ background:data.image&&!isSaving?"#e67e22":"#d5d0cb", color:"#fff", border:"none", borderRadius:16, padding:"6px 16px", fontSize:14, fontWeight:600, cursor:data.image&&!isSaving?"pointer":"default" }}>
-          {isSaving ? "保存中..." : "保存"}
-        </button>
-      </div>
-      <div style={{ padding:16 }}>
-        <input type="file" accept="image/*" ref={fRef} onChange={e => handleFile(e, img => setData(p=>({...p,image:img})), f => setData(p=>({...p,newFile:f,file:f})))} style={{ display:"none" }} />
-        {data.image ? (
-          <div style={{ position:"relative", marginBottom:20 }}>
-            <img src={data.image} style={{ width:"100%", borderRadius:12, display:"block" }} alt="" />
-            <div style={{ position:"absolute", top:8, right:8, display:"flex", gap:6 }}>
-              <button onClick={()=>fRef.current?.click()} style={{ background:"rgba(0,0,0,0.5)", color:"#fff", border:"none", borderRadius:16, padding:"6px 12px", fontSize:12, cursor:"pointer" }}>📷 更换</button>
-              <button onClick={()=>setData(p=>({...p,image:null,file:null,newFile:null}))} style={{ background:"rgba(0,0,0,0.5)", color:"#fff", border:"none", borderRadius:"50%", width:32, height:32, fontSize:16, cursor:"pointer" }}>✕</button>
-            </div>
-          </div>
-        ) : (
-          <div onClick={()=>fRef.current?.click()} style={{ border:"2px dashed #d5d0cb", borderRadius:12, padding:"44px 20px", textAlign:"center", cursor:"pointer", marginBottom:20, background:"#fff" }}>
-            <div style={{ fontSize:40, marginBottom:8 }}>📸</div>
-            <p style={{ color:"#9a9590", fontSize:14, margin:0 }}>点击选择照片</p>
-          </div>
-        )}
-        <div style={{ marginBottom:20 }}>
-          <label style={{ fontSize:13, fontWeight:600, color:"#6b6560", display:"block", marginBottom:8 }}>菜名</label>
-          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-            <span style={{ fontSize:12, color:"#9a9590", width:56, flexShrink:0 }}>🇨🇳 中文</span>
-            <input value={data.names.zh} onChange={e=>setData(p=>({...p,names:{...p.names,zh:e.target.value}}))} placeholder="输入中文菜名"
-              style={{ flex:1, padding:"9px 12px", border:"1px solid #d5d0cb", borderRadius:8, fontSize:14, outline:"none", background:"#fff", boxSizing:"border-box" }} />
-          </div>
-          <button onClick={onTranslate} disabled={!data.names.zh.trim()||isTranslating}
-            style={{ width:"100%", padding:"9px 0", border:"1px solid #d5d0cb", borderRadius:8, fontSize:13, fontWeight:600, cursor:data.names.zh.trim()&&!isTranslating?"pointer":"default", marginBottom:10, background:isTranslating?"#f0eeea":"#fff", color:isTranslating?"#9a9590":"#e67e22" }}>
-            {isTranslating ? "⏳ 翻译中..." : "✨ 自动翻译日文和英文"}
+  const PhotoForm = ({ data, setData, onSave, title, onBack, fRef, isSaving }) => {
+    const canSplit = data.names.zh.includes("/");
+    const doSplit = () => {
+      const result = smartSplit(data.names.zh);
+      if (result) setData(p => ({ ...p, names: { zh: result.zh, ja: result.ja, en: result.en } }));
+    };
+    return (
+      <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8" }}>
+        <div style={{ position:"sticky", top:0, zIndex:10, background:"#fafaf8", borderBottom:"1px solid #e8e5e0", padding:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <button onClick={onBack} style={{ background:"none", border:"none", fontSize:15, color:"#6b6560", cursor:"pointer" }}>← 返回</button>
+          <h2 style={{ fontSize:17, fontWeight:600, color:"#2d2a26", margin:0 }}>{title}</h2>
+          <button onClick={onSave} disabled={!data.image || isSaving} style={{ background:data.image&&!isSaving?"#e67e22":"#d5d0cb", color:"#fff", border:"none", borderRadius:16, padding:"6px 16px", fontSize:14, fontWeight:600, cursor:data.image&&!isSaving?"pointer":"default" }}>
+            {isSaving ? "保存中..." : "保存"}
           </button>
-          {[{key:"ja",label:"🇯🇵 日本語",ph:"日文菜名"},{key:"en",label:"🇬🇧 English",ph:"English name"}].map(({key,label,ph})=>(
-            <div key={key} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-              <span style={{ fontSize:12, color:"#9a9590", width:56, flexShrink:0 }}>{label}</span>
-              <input value={data.names[key]} onChange={e=>setData(p=>({...p,names:{...p.names,[key]:e.target.value}}))} placeholder={ph}
+        </div>
+        <div style={{ padding:16 }}>
+          <input type="file" accept="image/*" ref={fRef} onChange={e => handleFile(e, img => setData(p=>({...p,image:img})), f => setData(p=>({...p,newFile:f,file:f})))} style={{ display:"none" }} />
+          {data.image ? (
+            <div style={{ position:"relative", marginBottom:20 }}>
+              <img src={data.image} style={{ width:"100%", borderRadius:12, display:"block" }} alt="" />
+              <div style={{ position:"absolute", top:8, right:8, display:"flex", gap:6 }}>
+                <button onClick={()=>fRef.current?.click()} style={{ background:"rgba(0,0,0,0.5)", color:"#fff", border:"none", borderRadius:16, padding:"6px 12px", fontSize:12, cursor:"pointer" }}>📷 更换</button>
+                <button onClick={()=>setData(p=>({...p,image:null,file:null,newFile:null}))} style={{ background:"rgba(0,0,0,0.5)", color:"#fff", border:"none", borderRadius:"50%", width:32, height:32, fontSize:16, cursor:"pointer" }}>✕</button>
+              </div>
+            </div>
+          ) : (
+            <div onClick={()=>fRef.current?.click()} style={{ border:"2px dashed #d5d0cb", borderRadius:12, padding:"44px 20px", textAlign:"center", cursor:"pointer", marginBottom:20, background:"#fff" }}>
+              <div style={{ fontSize:40, marginBottom:8 }}>📸</div>
+              <p style={{ color:"#9a9590", fontSize:14, margin:0 }}>点击选择照片</p>
+            </div>
+          )}
+          <div style={{ marginBottom:20 }}>
+            <label style={{ fontSize:13, fontWeight:600, color:"#6b6560", display:"block", marginBottom:8 }}>菜名</label>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+              <span style={{ fontSize:12, color:"#9a9590", width:56, flexShrink:0 }}>🇨🇳 中文</span>
+              <input value={data.names.zh} onChange={e=>setData(p=>({...p,names:{...p.names,zh:e.target.value}}))} placeholder="输入菜名，或用 / 分隔三语"
                 style={{ flex:1, padding:"9px 12px", border:"1px solid #d5d0cb", borderRadius:8, fontSize:14, outline:"none", background:"#fff", boxSizing:"border-box" }} />
             </div>
-          ))}
-        </div>
-        <div>
-          <label style={{ fontSize:13, fontWeight:600, color:"#6b6560", display:"block", marginBottom:10 }}>标签</label>
-          {Object.entries(tagSystem).map(([cat,v],ci) => {
-            const col = getCatColor(ci);
-            return (
-              <div key={cat} style={{ marginBottom:14 }}>
-                <p style={{ fontSize:12, fontWeight:600, color:col.text, margin:"0 0 6px" }}>{v.emoji} {cat}</p>
-                <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
-                  {v.tags.map(tag=>(
-                    <button key={tag} onClick={()=>setData(p=>({...p,tags:p.tags.includes(tag)?p.tags.filter(t=>t!==tag):[...p.tags,tag]}))} style={{
-                      border:"1px solid", borderRadius:14, padding:"5px 14px", fontSize:13, cursor:"pointer",
-                      background:data.tags.includes(tag)?col.active:col.bg, color:data.tags.includes(tag)?"#fff":col.text, borderColor:data.tags.includes(tag)?col.active:col.border,
-                    }}>{tag}</button>
-                  ))}
-                </div>
+            {canSplit && (
+              <button onClick={doSplit}
+                style={{ width:"100%", padding:"9px 0", border:"1px solid #e67e22", borderRadius:8, fontSize:13, fontWeight:600, cursor:"pointer", marginBottom:10, background:"#fff8f0", color:"#e67e22" }}>
+                ✨ 检测到 /，点击自动拆分到三语
+              </button>
+            )}
+            <p style={{ fontSize:11, color:"#b0aaa5", margin:"0 0 10px", paddingLeft:64 }}>
+              💡 支持格式：中文名/日文名/英文名
+            </p>
+            {[{key:"ja",label:"🇯🇵 日本語",ph:"日文菜名"},{key:"en",label:"🇬🇧 English",ph:"English name"}].map(({key,label,ph})=>(
+              <div key={key} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                <span style={{ fontSize:12, color:"#9a9590", width:56, flexShrink:0 }}>{label}</span>
+                <input value={data.names[key]} onChange={e=>setData(p=>({...p,names:{...p.names,[key]:e.target.value}}))} placeholder={ph}
+                  style={{ flex:1, padding:"9px 12px", border:"1px solid #d5d0cb", borderRadius:8, fontSize:14, outline:"none", background:"#fff", boxSizing:"border-box" }} />
               </div>
-            );
-          })}
+            ))}
+          </div>
+          <div>
+            <label style={{ fontSize:13, fontWeight:600, color:"#6b6560", display:"block", marginBottom:10 }}>标签</label>
+            {Object.entries(tagSystem).map(([cat,v],ci) => {
+              const col = getCatColor(ci);
+              return (
+                <div key={cat} style={{ marginBottom:14 }}>
+                  <p style={{ fontSize:12, fontWeight:600, color:col.text, margin:"0 0 6px" }}>{v.emoji} {cat}</p>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+                    {v.tags.map(tag=>(
+                      <button key={tag} onClick={()=>setData(p=>({...p,tags:p.tags.includes(tag)?p.tags.filter(t=>t!==tag):[...p.tags,tag]}))} style={{
+                        border:"1px solid", borderRadius:14, padding:"5px 14px", fontSize:13, cursor:"pointer",
+                        background:data.tags.includes(tag)?col.active:col.bg, color:data.tags.includes(tag)?"#fff":col.text, borderColor:data.tags.includes(tag)?col.active:col.border,
+                      }}>{tag}</button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
-  // Loading
   if (loading) {
     return (
       <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8", display:"flex", alignItems:"center", justifyContent:"center" }}>
-        <div style={{ textAlign:"center" }}>
-          <div style={{ fontSize:48, marginBottom:12 }}>🍳</div>
-          <p style={{ color:"#9a9590", fontSize:15 }}>加载中...</p>
-        </div>
+        <div style={{ textAlign:"center" }}><div style={{ fontSize:48, marginBottom:12 }}>🍳</div><p style={{ color:"#9a9590", fontSize:15 }}>加载中...</p></div>
       </div>
     );
   }
@@ -434,18 +400,14 @@ export default function App() {
 
   // === ADD NEW ===
   if (view === "upload") {
-    return <PhotoForm data={upload} setData={setUpload} onSave={saveNew} title="添加料理" isSaving={saving}
-      onBack={()=>{setView("gallery");setUpload({image:null,file:null,names:{zh:"",ja:"",en:""},tags:[]});}}
-      isTranslating={translating} fRef={fileRef}
-      onTranslate={()=>doTranslate(upload.names.zh, parsed=>setUpload(p=>({...p,names:{...p.names,ja:parsed.ja||"",en:parsed.en||""}})), setTranslating)} />;
+    return <PhotoForm data={upload} setData={setUpload} onSave={saveNew} title="添加料理" isSaving={saving} fRef={fileRef}
+      onBack={()=>{setView("gallery");setUpload({image:null,file:null,names:{zh:"",ja:"",en:""},tags:[]});}} />;
   }
 
   // === EDIT ===
   if (view === "edit" && editing) {
-    return <PhotoForm data={editing} setData={setEditing} onSave={saveEdit} title="编辑料理" isSaving={saving}
-      onBack={()=>{setEditing(null);setView("detail");}}
-      isTranslating={editTranslating} fRef={editFileRef}
-      onTranslate={()=>doTranslate(editing.names.zh, parsed=>setEditing(p=>({...p,names:{...p.names,ja:parsed.ja||"",en:parsed.en||""}})), setEditTranslating)} />;
+    return <PhotoForm data={editing} setData={setEditing} onSave={saveEdit} title="编辑料理" isSaving={saving} fRef={editFileRef}
+      onBack={()=>{setEditing(null);setView("detail");}} />;
   }
 
   // === DETAIL ===
