@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
 
 const ADMIN_PASSWORD = "5233";
+const COVER_TAG = "封面";
 
 const CAT_COLORS_LIST = [
   { bg:"#fef3e2",active:"#f59e0b",text:"#92400e",border:"#fcd34d" },
@@ -19,6 +20,9 @@ const LANG_LABELS = { zh:"中", ja:"日", en:"EN" };
 const getCatColor = i => CAT_COLORS_LIST[i % CAT_COLORS_LIST.length];
 
 function TagPill({ tag, small, tagSystem }) {
+  if (tag === COVER_TAG) {
+    return <span style={{ background:"#fffbeb", color:"#b45309", border:"1px solid #fcd34d", borderRadius:12, padding:small?"1px 7px":"3px 10px", fontSize:small?10:12, fontWeight:500, whiteSpace:"nowrap", display:"inline-block" }}>⭐ {tag}</span>;
+  }
   let ci = 0, found = false;
   const cats = Object.keys(tagSystem);
   for (let i = 0; i < cats.length; i++) {
@@ -35,22 +39,16 @@ function smartSplit(input) {
   return null;
 }
 
-// Password modal
 function PasswordModal({ onSuccess, onCancel }) {
   const [pw, setPw] = useState("");
   const [error, setError] = useState(false);
-  const check = () => {
-    if (pw === ADMIN_PASSWORD) { onSuccess(); }
-    else { setError(true); setPw(""); }
-  };
+  const check = () => { if (pw === ADMIN_PASSWORD) onSuccess(); else { setError(true); setPw(""); } };
   return (
     <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.4)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
       <div style={{ background:"#fff", borderRadius:16, padding:24, width:"100%", maxWidth:320 }}>
         <h3 style={{ fontSize:17, fontWeight:600, color:"#2d2a26", margin:"0 0 4px", textAlign:"center" }}>🔒 需要管理员密码</h3>
         <p style={{ fontSize:13, color:"#9a9590", margin:"0 0 16px", textAlign:"center" }}>请输入密码以继续操作</p>
-        <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setError(false);}}
-          onKeyDown={e=>e.key==="Enter"&&check()}
-          placeholder="输入密码" autoFocus
+        <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setError(false);}} onKeyDown={e=>e.key==="Enter"&&check()} placeholder="输入密码" autoFocus
           style={{ width:"100%", padding:"10px 12px", border:`1px solid ${error?"#ef4444":"#d5d0cb"}`, borderRadius:8, fontSize:15, outline:"none", boxSizing:"border-box", marginBottom:8 }} />
         {error && <p style={{ fontSize:12, color:"#ef4444", margin:"0 0 8px" }}>密码不正确，请重试</p>}
         <div style={{ display:"flex", gap:8 }}>
@@ -74,27 +72,25 @@ export default function App() {
   const [lang, setLang] = useState("zh");
   const [filterCat, setFilterCat] = useState(null);
   const [selectedTags, setSelectedTags] = useState([]);
+  const [specialFilter, setSpecialFilter] = useState("cover"); // "cover" | "all" | null(category)
   const [upload, setUpload] = useState({ image:null, file:null, names:{zh:"",ja:"",en:""}, tags:[] });
   const [detail, setDetail] = useState(null);
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [init, setInit] = useState(false);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState([]);
+  const [batchTagging, setBatchTagging] = useState(false);
   const [tagMgr, setTagMgr] = useState({ editingCat:null, newCatName:"", newCatEmoji:"🏷️", newTagText:{}, renamingCat:null, renameCatName:"", renamingTag:null, renameTagVal:"", confirmDeleteCat:null, editTitle:false, editTitleVal:"" });
   const fileRef = useRef();
   const editFileRef = useRef();
 
-  // Admin check: run action if admin, otherwise show password modal
   const requireAdmin = (action) => {
     if (isAdmin) { action(); return; }
     setPendingAction(() => action);
     setShowPwModal(true);
   };
-
-  const onPwSuccess = () => {
-    setIsAdmin(true);
-    setShowPwModal(false);
-    if (pendingAction) { pendingAction(); setPendingAction(null); }
-  };
+  const onPwSuccess = () => { setIsAdmin(true); setShowPwModal(false); if (pendingAction) { pendingAction(); setPendingAction(null); } };
 
   useEffect(() => { if (!init) { loadAll(); setInit(true); } }, [init]);
 
@@ -190,7 +186,45 @@ export default function App() {
     if (rows.length > 0) await supabase.from("tag_system").insert(rows);
   };
 
-  const filtered = selectedTags.length === 0 ? photos : photos.filter(p => selectedTags.every(t => p.tags.includes(t)));
+  // Batch tag operations
+  const toggleBatchSelect = (id) => {
+    setBatchSelected(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
+  };
+
+  const applyBatchTags = async (tagsToAdd, tagsToRemove) => {
+    setSaving(true);
+    const updates = photos.filter(p => batchSelected.includes(p.id)).map(p => {
+      let newTags = [...p.tags];
+      tagsToAdd.forEach(t => { if (!newTags.includes(t)) newTags.push(t); });
+      tagsToRemove.forEach(t => { newTags = newTags.filter(x => x !== t); });
+      return { ...p, tags: newTags };
+    });
+    for (const u of updates) {
+      await supabase.from("photos").update({ tags: u.tags }).eq("id", u.id);
+    }
+    setPhotos(p => p.map(ph => {
+      const upd = updates.find(u => u.id === ph.id);
+      return upd || ph;
+    }));
+    setBatchMode(false);
+    setBatchSelected([]);
+    setBatchTagging(false);
+    setSaving(false);
+  };
+
+  // Filtering logic
+  const getFiltered = () => {
+    let base = photos;
+    if (specialFilter === "cover") {
+      base = base.filter(p => p.tags.includes(COVER_TAG));
+    }
+    if (selectedTags.length > 0) {
+      base = base.filter(p => selectedTags.every(t => p.tags.includes(t)));
+    }
+    return base;
+  };
+  const filtered = getFiltered();
+
   const toggleFilter = tag => setSelectedTags(p => p.includes(tag) ? p.filter(t=>t!==tag) : [...p,tag]);
   const getName = photo => photo.names[lang] || photo.names.zh || "未命名";
 
@@ -258,6 +292,9 @@ export default function App() {
     setTagMgr(p => ({ ...p, renamingTag:null }));
   };
 
+  // All available tags for batch tagging
+  const allTags = [COVER_TAG, ...Object.values(tagSystem).flatMap(v => v.tags)];
+
   const PhotoForm = ({ data, setData, onSave, title, onBack, fRef, isSaving }) => {
     const canSplit = data.names.zh.includes("/");
     const doSplit = () => {
@@ -302,9 +339,7 @@ export default function App() {
                 ✨ 检测到 /，点击自动拆分到三语
               </button>
             )}
-            <p style={{ fontSize:11, color:"#b0aaa5", margin:"0 0 10px", paddingLeft:64 }}>
-              💡 支持格式：中文名/日文名/英文名
-            </p>
+            <p style={{ fontSize:11, color:"#b0aaa5", margin:"0 0 10px", paddingLeft:64 }}>💡 支持格式：中文名/日文名/英文名</p>
             {[{key:"ja",label:"🇯🇵 日本語",ph:"日文菜名"},{key:"en",label:"🇬🇧 English",ph:"English name"}].map(({key,label,ph})=>(
               <div key={key} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
                 <span style={{ fontSize:12, color:"#9a9590", width:56, flexShrink:0 }}>{label}</span>
@@ -315,6 +350,14 @@ export default function App() {
           </div>
           <div>
             <label style={{ fontSize:13, fontWeight:600, color:"#6b6560", display:"block", marginBottom:10 }}>标签</label>
+            {/* Cover tag */}
+            <div style={{ marginBottom:14 }}>
+              <p style={{ fontSize:12, fontWeight:600, color:"#b45309", margin:"0 0 6px" }}>⭐ 特殊</p>
+              <button onClick={()=>setData(p=>({...p,tags:p.tags.includes(COVER_TAG)?p.tags.filter(t=>t!==COVER_TAG):[...p.tags,COVER_TAG]}))} style={{
+                border:"1px solid", borderRadius:14, padding:"5px 14px", fontSize:13, cursor:"pointer",
+                background:data.tags.includes(COVER_TAG)?"#f59e0b":"#fffbeb", color:data.tags.includes(COVER_TAG)?"#fff":"#b45309", borderColor:data.tags.includes(COVER_TAG)?"#f59e0b":"#fcd34d",
+              }}>⭐ 封面</button>
+            </div>
             {Object.entries(tagSystem).map(([cat,v],ci) => {
               const col = getCatColor(ci);
               return (
@@ -337,6 +380,71 @@ export default function App() {
     );
   };
 
+  // Batch tag panel
+  const BatchTagPanel = () => {
+    const [tagsToAdd, setTagsToAdd] = useState([]);
+    const [tagsToRemove, setTagsToRemove] = useState([]);
+    const toggleAdd = t => { setTagsToRemove(p=>p.filter(x=>x!==t)); setTagsToAdd(p=>p.includes(t)?p.filter(x=>x!==t):[...p,t]); };
+    const toggleRemove = t => { setTagsToAdd(p=>p.filter(x=>x!==t)); setTagsToRemove(p=>p.includes(t)?p.filter(x=>x!==t):[...p,t]); };
+    return (
+      <div style={{ position:"fixed", bottom:0, left:0, right:0, background:"#fff", borderTop:"2px solid #e8e5e0", zIndex:50, maxHeight:"60vh", overflowY:"auto", padding:16 }}>
+        <div style={{ maxWidth:480, margin:"0 auto" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+            <h3 style={{ fontSize:15, fontWeight:600, color:"#2d2a26", margin:0 }}>批量标签 · 已选 {batchSelected.length} 张</h3>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={()=>{setBatchTagging(false);}} style={{ background:"#f0eeea", border:"none", borderRadius:8, padding:"6px 12px", fontSize:13, cursor:"pointer", color:"#6b6560" }}>取消</button>
+              <button onClick={()=>applyBatchTags(tagsToAdd, tagsToRemove)} disabled={saving||(tagsToAdd.length===0&&tagsToRemove.length===0)}
+                style={{ background:(tagsToAdd.length>0||tagsToRemove.length>0)&&!saving?"#e67e22":"#d5d0cb", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", fontSize:13, fontWeight:600, cursor:(tagsToAdd.length>0||tagsToRemove.length>0)&&!saving?"pointer":"default" }}>
+                {saving?"处理中...":"应用"}
+              </button>
+            </div>
+          </div>
+          <p style={{ fontSize:11, color:"#9a9590", margin:"0 0 10px" }}>点击标签添加（绿色）或移除（红色），再点取消选择</p>
+          {/* Cover tag */}
+          <div style={{ marginBottom:10 }}>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              <button onClick={()=>{ if(tagsToAdd.includes(COVER_TAG)) toggleAdd(COVER_TAG); else if(tagsToRemove.includes(COVER_TAG)) toggleRemove(COVER_TAG); else toggleAdd(COVER_TAG); }}
+                onContextMenu={e=>{e.preventDefault();toggleRemove(COVER_TAG);}}
+                style={{ border:"1px solid", borderRadius:14, padding:"5px 14px", fontSize:13, cursor:"pointer",
+                  background:tagsToAdd.includes(COVER_TAG)?"#10b981":tagsToRemove.includes(COVER_TAG)?"#ef4444":"#f9fafb",
+                  color:tagsToAdd.includes(COVER_TAG)||tagsToRemove.includes(COVER_TAG)?"#fff":"#6b7280",
+                  borderColor:tagsToAdd.includes(COVER_TAG)?"#10b981":tagsToRemove.includes(COVER_TAG)?"#ef4444":"#d1d5db",
+                }}>
+                {tagsToAdd.includes(COVER_TAG)?"+ ":"" }{tagsToRemove.includes(COVER_TAG)?"- ":""}⭐ 封面
+              </button>
+            </div>
+          </div>
+          {Object.entries(tagSystem).map(([cat,v],ci)=>{
+            const col = getCatColor(ci);
+            return (
+              <div key={cat} style={{ marginBottom:10 }}>
+                <p style={{ fontSize:11, fontWeight:600, color:col.text, margin:"0 0 4px" }}>{v.emoji} {cat}</p>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {v.tags.map(tag=>{
+                    const isAdd = tagsToAdd.includes(tag);
+                    const isRem = tagsToRemove.includes(tag);
+                    return (
+                      <button key={tag} onClick={()=>{ if(isAdd) toggleAdd(tag); else if(isRem) toggleRemove(tag); else toggleAdd(tag); }}
+                        onContextMenu={e=>{e.preventDefault();toggleRemove(tag);}}
+                        style={{ border:"1px solid", borderRadius:14, padding:"4px 12px", fontSize:12, cursor:"pointer",
+                          background:isAdd?"#10b981":isRem?"#ef4444":"#f9fafb",
+                          color:isAdd||isRem?"#fff":"#6b7280",
+                          borderColor:isAdd?"#10b981":isRem?"#ef4444":"#d1d5db",
+                        }}>
+                        {isAdd?"+ ":""}{isRem?"- ":""}{tag}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          <p style={{ fontSize:11, color:"#b0aaa5", margin:"8px 0 0" }}>💡 点一次 = 添加（绿），点两次 = 取消，长按/右键 = 移除（红）</p>
+        </div>
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8", display:"flex", alignItems:"center", justifyContent:"center" }}>
@@ -348,7 +456,7 @@ export default function App() {
   // === GALLERY ===
   if (view === "gallery") {
     return (
-      <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8" }}>
+      <div style={{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#fafaf8", paddingBottom:batchMode?200:0 }}>
         {showPwModal && <PasswordModal onSuccess={onPwSuccess} onCancel={()=>{setShowPwModal(false);setPendingAction(null);}} />}
         <div style={{ position:"sticky", top:0, zIndex:10, background:"#fafaf8", borderBottom:"1px solid #e8e5e0", padding:"14px 16px 12px" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
@@ -373,28 +481,46 @@ export default function App() {
             </div>
             <div style={{ display:"flex", gap:6, alignItems:"center", flexShrink:0, marginLeft:8 }}>
               <LangSwitch size="sm" />
-              {isAdmin && <button onClick={()=>setView("tags")} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 10px", fontSize:13, cursor:"pointer" }}>⚙️</button>}
-              <button onClick={()=>requireAdmin(()=>setView("upload"))} style={{ background:"#e67e22", color:"#fff", border:"none", borderRadius:18, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
-                {isAdmin ? "+ 追加" : "🔒 管理"}
-              </button>
+              {isAdmin && !batchMode && <button onClick={()=>setView("tags")} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 10px", fontSize:13, cursor:"pointer" }}>⚙️</button>}
+              {isAdmin && !batchMode && (
+                <button onClick={()=>setBatchMode(true)} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 10px", fontSize:13, cursor:"pointer" }}>☑️</button>
+              )}
+              {batchMode ? (
+                <div style={{ display:"flex", gap:6 }}>
+                  <button onClick={()=>{setBatchMode(false);setBatchSelected([]);}} style={{ background:"#f0eeea", border:"none", borderRadius:18, padding:"7px 12px", fontSize:13, cursor:"pointer", color:"#6b6560" }}>取消</button>
+                  {batchSelected.length > 0 && (
+                    <button onClick={()=>setBatchTagging(true)} style={{ background:"#e67e22", color:"#fff", border:"none", borderRadius:18, padding:"7px 12px", fontSize:13, fontWeight:600, cursor:"pointer" }}>标签 ({batchSelected.length})</button>
+                  )}
+                </div>
+              ) : (
+                <button onClick={()=>requireAdmin(()=>setView("upload"))} style={{ background:"#e67e22", color:"#fff", border:"none", borderRadius:18, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+                  {isAdmin ? "+ 追加" : "🔒 管理"}
+                </button>
+              )}
             </div>
           </div>
+          {/* Filter tabs: 封面, 全部, categories */}
           <div style={{ display:"flex", gap:6, marginBottom:8, overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
-            <button onClick={()=>{setFilterCat(null);setSelectedTags([]);}} style={{
+            <button onClick={()=>{setSpecialFilter("cover");setFilterCat(null);setSelectedTags([]);}} style={{
               flexShrink:0, border:"1px solid", borderRadius:14, padding:"4px 12px", fontSize:12, fontWeight:500, cursor:"pointer",
-              background:!filterCat?"#2d2a26":"#fff", color:!filterCat?"#fff":"#6b6560", borderColor:!filterCat?"#2d2a26":"#d5d0cb",
+              background:specialFilter==="cover"?"#f59e0b":"#fff", color:specialFilter==="cover"?"#fff":"#b45309", borderColor:specialFilter==="cover"?"#f59e0b":"#fcd34d",
+            }}>⭐ 封面</button>
+            <button onClick={()=>{setSpecialFilter("all");setFilterCat(null);setSelectedTags([]);}} style={{
+              flexShrink:0, border:"1px solid", borderRadius:14, padding:"4px 12px", fontSize:12, fontWeight:500, cursor:"pointer",
+              background:specialFilter==="all"?"#2d2a26":"#fff", color:specialFilter==="all"?"#fff":"#6b6560", borderColor:specialFilter==="all"?"#2d2a26":"#d5d0cb",
             }}>全部</button>
             {Object.entries(tagSystem).map(([cat,v],ci)=>{
               const col=getCatColor(ci);
+              const isActive = specialFilter===null && filterCat===cat;
               return (
-                <button key={cat} onClick={()=>setFilterCat(filterCat===cat?null:cat)} style={{
+                <button key={cat} onClick={()=>{setSpecialFilter(null);setFilterCat(filterCat===cat?null:cat);setSelectedTags([]);}} style={{
                   flexShrink:0, border:"1px solid", borderRadius:14, padding:"4px 12px", fontSize:12, fontWeight:500, cursor:"pointer",
-                  background:filterCat===cat?col.active:"#fff", color:filterCat===cat?"#fff":col.text, borderColor:filterCat===cat?col.active:"#d5d0cb",
+                  background:isActive?col.active:"#fff", color:isActive?"#fff":col.text, borderColor:isActive?col.active:"#d5d0cb",
                 }}>{v.emoji} {cat}</button>
               );
             })}
           </div>
-          {filterCat && tagSystem[filterCat] && (
+          {specialFilter===null && filterCat && tagSystem[filterCat] && (
             <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
               {tagSystem[filterCat].tags.map(tag=>{
                 const ci=Object.keys(tagSystem).indexOf(filterCat); const col=getCatColor(ci);
@@ -417,16 +543,26 @@ export default function App() {
         </div>
         {filtered.length===0 ? (
           <div style={{ textAlign:"center", padding:"60px 20px", color:"#9a9590" }}>
-            <div style={{ fontSize:48, marginBottom:12 }}>{photos.length===0?"📷":"🔍"}</div>
-            <p style={{ fontSize:15 }}>{photos.length===0?"还没有料理照片":"没有找到匹配的料理"}</p>
-            {photos.length===0 && <p style={{ fontSize:13 }}>点击「+ 追加」开始添加吧</p>}
+            <div style={{ fontSize:48, marginBottom:12 }}>{specialFilter==="cover"?"⭐":photos.length===0?"📷":"🔍"}</div>
+            <p style={{ fontSize:15 }}>{specialFilter==="cover"?"还没有标记封面的料理":photos.length===0?"还没有料理照片":"没有找到匹配的料理"}</p>
+            {specialFilter==="cover" && photos.length>0 && <p style={{ fontSize:13 }}>编辑料理时可以添加「⭐ 封面」标签</p>}
           </div>
         ) : (
           <div style={{ padding:8, display:"flex", gap:8 }}>
             {[0,1].map(col=>(
               <div key={col} style={{ flex:1, display:"flex", flexDirection:"column", gap:8 }}>
                 {filtered.filter((_,i)=>i%2===col).map(p=>(
-                  <div key={p.id} onClick={()=>{setDetail(p);setView("detail");}} style={{ cursor:"pointer", borderRadius:10, overflow:"hidden", background:"#fff", boxShadow:"0 1px 3px rgba(0,0,0,0.06)" }}>
+                  <div key={p.id} onClick={()=>{
+                    if (batchMode) { toggleBatchSelect(p.id); return; }
+                    setDetail(p);setView("detail");
+                  }} style={{ cursor:"pointer", borderRadius:10, overflow:"hidden", background:"#fff", boxShadow:"0 1px 3px rgba(0,0,0,0.06)", position:"relative",
+                    outline: batchSelected.includes(p.id) ? "3px solid #e67e22" : "none",
+                  }}>
+                    {batchMode && (
+                      <div style={{ position:"absolute", top:6, left:6, width:24, height:24, borderRadius:"50%", background:batchSelected.includes(p.id)?"#e67e22":"rgba(255,255,255,0.8)", border:batchSelected.includes(p.id)?"none":"2px solid #d5d0cb", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2 }}>
+                        {batchSelected.includes(p.id) && <span style={{ color:"#fff", fontSize:14, fontWeight:700 }}>✓</span>}
+                      </div>
+                    )}
                     <img src={p.image} style={{ width:"100%", display:"block" }} alt="" />
                     <div style={{ padding:"8px 10px 10px" }}>
                       <p style={{ fontSize:13, fontWeight:600, color:"#2d2a26", margin:"0 0 5px", lineHeight:1.3 }}>{getName(p)}</p>
@@ -441,6 +577,7 @@ export default function App() {
             ))}
           </div>
         )}
+        {batchTagging && <BatchTagPanel />}
       </div>
     );
   }
@@ -470,9 +607,7 @@ export default function App() {
               <button onClick={()=>{setEditing({...detail});setView("edit");}} style={{ background:"none", border:"none", fontSize:14, color:"#e67e22", cursor:"pointer", fontWeight:600 }}>编辑</button>
               <button onClick={()=>del(detail.id)} style={{ background:"none", border:"none", fontSize:14, color:"#e74c3c", cursor:"pointer" }}>删除</button>
             </div>
-          ) : (
-            <div style={{ width: 40 }} />
-          )}
+          ) : <div style={{ width:40 }} />}
         </div>
         <img src={detail.image} style={{ width:"100%", display:"block" }} alt="" />
         <div style={{ padding:16 }}>
@@ -481,6 +616,9 @@ export default function App() {
             <p key={l} style={{ fontSize:13, color:"#9a9590", margin:"1px 0" }}>{detail.names[l]}</p>
           ))}
           <p style={{ fontSize:12, color:"#b0aaa5", margin:"8px 0 12px" }}>{detail.date}</p>
+          {detail.tags.includes(COVER_TAG) && (
+            <div style={{ marginBottom:8 }}><TagPill tag={COVER_TAG} tagSystem={tagSystem} /></div>
+          )}
           {Object.entries(tagSystem).map(([cat,v],ci)=>{
             const matching=detail.tags.filter(t=>v.tags.includes(t));
             if(!matching.length) return null;
@@ -507,6 +645,11 @@ export default function App() {
           <div style={{ width:40 }} />
         </div>
         <div style={{ padding:16 }}>
+          {/* Cover tag info */}
+          <div style={{ background:"#fffbeb", borderRadius:12, padding:14, marginBottom:12, border:"1px solid #fcd34d" }}>
+            <p style={{ fontSize:13, fontWeight:600, color:"#b45309", margin:0 }}>⭐ 封面标签</p>
+            <p style={{ fontSize:12, color:"#92400e", margin:"4px 0 0" }}>打开 App 默认展示标记了「封面」的料理。此标签不可删除或修改。</p>
+          </div>
           {Object.entries(tagSystem).map(([cat,v],ci)=>{
             const col=getCatColor(ci);
             const isEditing=tagMgr.editingCat===cat;
