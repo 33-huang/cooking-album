@@ -71,6 +71,13 @@ const T = {
   unnamed: { zh:"未命名", ja:"名前なし", en:"Unnamed" },
 };
 
+// App title translations
+const TITLE_I18N = {
+  zh: "🍳 三三食堂",
+  ja: "🍳 三ちゃん食堂",
+  en: "🍳 Sunny's Kitchen",
+};
+
 // Tag & category name translations (key = Chinese name stored in DB)
 const TAG_I18N = {
   // Category names
@@ -486,7 +493,7 @@ export default function App() {
                 </div>
               ) : (
                 <div>
-                  <h1 style={{ fontSize:20, fontWeight:700, color:"#2d2a26", margin:0, display:"flex", alignItems:"center", gap:4 }}>{appTitle}{isAdmin && <span onClick={()=>setTagMgr(p=>({...p,editTitle:true,editTitleVal:appTitle}))} style={{ fontSize:12, color:"#c0bbb5", cursor:"pointer" }}>✏️</span>}</h1>
+                  <h1 style={{ fontSize:20, fontWeight:700, color:"#2d2a26", margin:0, display:"flex", alignItems:"center", gap:4 }}>{TITLE_I18N[lang] || appTitle}{isAdmin && <span onClick={()=>setTagMgr(p=>({...p,editTitle:true,editTitleVal:appTitle}))} style={{ fontSize:12, color:"#c0bbb5", cursor:"pointer" }}>✏️</span>}</h1>
                   <p style={{ fontSize:11, color:"#9a9590", margin:"2px 0 0" }}>{dishesText}</p>
                 </div>
               )}
