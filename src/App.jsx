@@ -85,6 +85,19 @@ export default function App() {
   const fileRef = useRef();
   const editFileRef = useRef();
 
+  // Helper: get all valid tags (cover + all tags in tagSystem)
+  const getValidTags = () => {
+    const valid = new Set([COVER_TAG]);
+    Object.values(tagSystem).forEach(v => v.tags.forEach(t => valid.add(t)));
+    return valid;
+  };
+
+  // Helper: filter tags for display on cards (exclude cover tag and deleted tags)
+  const getDisplayTags = (tags) => {
+    const valid = getValidTags();
+    return tags.filter(t => t !== COVER_TAG && valid.has(t));
+  };
+
   const requireAdmin = (action) => {
     if (isAdmin) { action(); return; }
     setPendingAction(() => action);
@@ -551,7 +564,9 @@ export default function App() {
           <div style={{ padding:8, display:"flex", gap:8 }}>
             {[0,1].map(col=>(
               <div key={col} style={{ flex:1, display:"flex", flexDirection:"column", gap:8 }}>
-                {filtered.filter((_,i)=>i%2===col).map(p=>(
+                {filtered.filter((_,i)=>i%2===col).map(p=>{
+                  const displayTags = getDisplayTags(p.tags);
+                  return (
                   <div key={p.id} onClick={()=>{
                     if (batchMode) { toggleBatchSelect(p.id); return; }
                     setDetail(p);setView("detail");
@@ -567,12 +582,13 @@ export default function App() {
                     <div style={{ padding:"8px 10px 10px" }}>
                       <p style={{ fontSize:13, fontWeight:600, color:"#2d2a26", margin:"0 0 5px", lineHeight:1.3 }}>{getName(p)}</p>
                       <div style={{ display:"flex", flexWrap:"wrap", gap:3 }}>
-                        {p.tags.slice(0,3).map(t=><TagPill key={t} tag={t} small tagSystem={tagSystem} />)}
-                        {p.tags.length>3 && <span style={{ fontSize:10, color:"#9a9590" }}>+{p.tags.length-3}</span>}
+                        {displayTags.slice(0,3).map(t=><TagPill key={t} tag={t} small tagSystem={tagSystem} />)}
+                        {displayTags.length>3 && <span style={{ fontSize:10, color:"#9a9590" }}>+{displayTags.length-3}</span>}
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ))}
           </div>
